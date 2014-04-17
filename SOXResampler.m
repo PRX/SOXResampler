@@ -20,7 +20,7 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
 
 + (void)load {
   [super load];
-
+  
 //  assert(sox_init() == SOX_SUCCESS);
 #warning Idk where this should happen
 //  sox_quit();
@@ -29,13 +29,13 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
 + (instancetype)sharedResampler {
   static dispatch_once_t pred;
   static id instance = nil;
-
+  
   dispatch_once(&pred, ^{
     if (!instance) {
       instance = self.new;
     }
   });
-
+  
   return instance;
 }
 
@@ -67,7 +67,7 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
     _operationQueue = [[NSOperationQueue alloc] init];
     _operationQueue.name = @"SOXResamplerDefaultOperationQueue";
   }
-
+  
   return _operationQueue;
 }
 
@@ -79,13 +79,13 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
 - (void)resampleTask:(SOXResamplerTask *)task {
   SOXResamplerTaskOperation *operation;
   operation = [SOXResamplerTaskOperation operationWithTask:task];
-
+  
   [self.operationQueue addOperation:operation];
 }
 
 - (void)didFinishResamplingTask:(SOXResamplerTask *)task toURL:(NSURL *)location {
   [self.delegate resampler:self task:task didFinishResamplingToURL:location];
-  [NSFileManager.defaultManager removeItemAtURL:location error:nil];
+//  [NSFileManager.defaultManager removeItemAtURL:location error:nil];
 }
 
 @end
