@@ -10,7 +10,7 @@
 #import "SOXResamplerConfiguration.h"
 #import "SOXResamplerTask_private.h"
 #import "SOXResamplerTaskOperation.h"
-#import "sox.h"
+#import <soxr/soxr.h>
 
 NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
 
@@ -21,7 +21,7 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
 + (void)load {
   [super load];
   
-  assert(sox_init() == SOX_SUCCESS);
+//  assert(sox_init() == SOX_SUCCESS);
 #warning Idk where this should happen
 //  sox_quit();
 }
@@ -85,7 +85,7 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
 
 - (void)didFinishResamplingTask:(SOXResamplerTask *)task toURL:(NSURL *)location {
   [self.delegate resampler:self task:task didFinishResamplingToURL:location];
-#warning clean up temp file once delegate returns
+  [NSFileManager.defaultManager removeItemAtURL:location error:nil];
 }
 
 @end
