@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name     = 'SOXResampler'
-  s.version  = '0.9.5'
+  s.version  = '0.9.6'
   s.license  = 'MIT'
   s.summary  = 'An iPhone and OS X libary for resampling PCM audio files with libsoxr'
   s.homepage = 'https://github.com/PRX/SOXResampler'
@@ -13,4 +13,7 @@ Pod::Spec.new do |s|
   s.osx.deployment_target = '10.7'
 
   s.source_files = '**/*.{h,m}'
+
+  s.dependency 'sndfile-Framework'
+  s.dependency 'soxr-Framework'
 end
