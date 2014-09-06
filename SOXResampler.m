@@ -26,6 +26,9 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
 //  sox_quit();
 }
 
+#pragma mark - Initializers
+#pragma mark Public
+
 + (instancetype)sharedResampler {
   static dispatch_once_t pred;
   static id instance = nil;
@@ -47,6 +50,8 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
   return [[self alloc] initWithConfiguration:configuration delegate:delegate operationQueue:queue];
 }
 
+#pragma mark Private
+
 - (instancetype)initWithConfiguration:(SOXResamplerConfiguration *)configuration {
   return [self initWithConfiguration:configuration delegate:nil operationQueue:nil];
 }
@@ -62,6 +67,8 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
   return self;
 }
 
+#pragma mark - Operation Queue
+
 - (NSOperationQueue *)operationQueue {
   if (!_operationQueue) {
     _operationQueue = [[NSOperationQueue alloc] init];
@@ -71,21 +78,63 @@ NSString * const SOXResamplerErrorDomain = @"SOXResamplerErrorDomain";
   return _operationQueue;
 }
 
-- (SOXResamplerTask *)taskWithURL:(NSURL *)url {
-  SOXResamplerTask *task = [[SOXResamplerTask alloc] initWithURL:url resampler:self];
-  return task;
+- (void)resampleTask:(SOXResamplerTask *)task {
+  if (!self.isInvalid) {
+    SOXResamplerTaskOperation *operation;
+    operation = [SOXResamplerTaskOperation operationWithTask:task];
+    
+    [self.operationQueue addOperation:operation];
+  }
 }
 
-- (void)resampleTask:(SOXResamplerTask *)task {
-  SOXResamplerTaskOperation *operation;
-  operation = [SOXResamplerTaskOperation operationWithTask:task];
+#pragma mark - Task Creation
+
+- (SOXResamplerTask *)taskWithURL:(NSURL *)url {
+  if (!self.isInvalid) {
+    id taskDelegate;
+    
+    if ([self.delegate conformsToProtocol:@protocol(SOXResamplerTaskDelegate)]) {
+      taskDelegate = self.delegate;
+    }
+    
+    SOXResamplerTask *task = [[SOXResamplerTask alloc] initWithURL:url resampler:self delegate:taskDelegate];
+    return task;
+  }
   
-  [self.operationQueue addOperation:operation];
+  return nil;
+}
+
+#pragma mark - Delegate Notification
+
+- (void)didBecomeInvalidWithError:(NSError *)error {
+  self.isInvalid = YES;
+  
+  if ([self.delegate respondsToSelector:@selector(resampler:didBecomeInvalidWithError:)]) {
+    [self.delegate resampler:self didBecomeInvalidWithError:error];
+  }
 }
 
 - (void)didFinishResamplingTask:(SOXResamplerTask *)task toURL:(NSURL *)location {
   [self.delegate resampler:self task:task didFinishResamplingToURL:location];
-//  [NSFileManager.defaultManager removeItemAtURL:location error:nil];
+  [NSFileManager.defaultManager removeItemAtURL:location error:nil];
+}
+
+#pragma mark - NSCopying
+
+- (id)copyWithZone:(NSZone *)zone {
+  SOXResampler *copy = self.class.new;
+  
+  copy->_configuration = self.immutableConfiguration.copy;
+  copy->_immutableConfiguration = self.immutableConfiguration.copy;
+  
+  copy.isInvalid = self.isInvalid;
+  
+  copy.resamplerDescription = self.resamplerDescription.copy;
+  
+  copy->_delegate = self.delegate;
+  copy->_operationQueue = self.operationQueue.copy;
+  
+  return copy;
 }
 
 @end

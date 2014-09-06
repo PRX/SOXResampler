@@ -10,6 +10,7 @@
 #import "SOXResamplerTask_private.h"
 #import "SOXResampler_private.h"
 #import "SOXResamplerConfiguration.h"
+#import "SOXResamplerError.h"
 #import "soxr.h"
 #import "sndfile.h"
 
@@ -19,6 +20,14 @@
 }
 
 @property (nonatomic, strong) SOXResamplerTask *task;
+
+@property (nonatomic) SNDFILE *inputFile;
+@property (nonatomic) SF_INFO inputFileInfo;
+
+@property (nonatomic) SNDFILE *outputFile;
+@property (nonatomic) SF_INFO outputFileInfo;
+
+@property (nonatomic) soxr_t soxr;
 
 - (void)didGetCanceled;
 
@@ -42,8 +51,13 @@
   self = [super init];
   if (self) {
     self.task = task;
+    
+    [self didInit];
   }
   return self;
+}
+
+- (void)didInit {
 }
 
 #pragma mark - Concurrent NSOperation
@@ -58,7 +72,7 @@
   
   NSString *GID = [[NSProcessInfo processInfo] globallyUniqueString];
   NSString *inputFileName = self.task.URL.path.pathComponents.lastObject;
-  NSString *outputFileName = [NSString stringWithFormat:@"%@_%@", GID, inputFileName];
+  NSString *outputFileName = [NSString stringWithFormat:@"%@_%@.au", GID, inputFileName];
   
   NSURL *outputFileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:outputFileName]];
   
@@ -114,6 +128,24 @@
   }
 }
 
+- (BOOL)isTaskCanceled {
+  if (self.task.isCanceled) {
+    NSDictionary *userInfo = @{ NSLocalizedDescriptionKey: @"Encoding was unsuccessful.",
+                                NSLocalizedFailureReasonErrorKey: @"Operation was canceled by the user.",
+                                NSLocalizedRecoverySuggestionErrorKey: @"Allow the operation to complete." };
+    
+    NSError *error = [NSError errorWithDomain:SOXResamplerErrorDomain
+                                         code:SOXResamplerErrorCancelled
+                                     userInfo:userInfo];
+    
+    [self didFailWithError:error];
+    
+    return YES;
+  }
+  
+  return NO;
+}
+
 - (void)didFailWithError:(NSError *)error {
   [self.task didCompleteWithError:error];
   [self didFinish];
@@ -121,130 +153,292 @@
 
 #pragma mark - Resampling
 
-// For SoX Resampler
 - (void)resampleToURL:(NSURL *)location {
+  if (!self.isTaskCanceled && self.isExecuting) {
+    [self openInputFile];
+    [self openOutputFile:location];
+    
+    [self setupResampler];
+    
+    [self resample:location];
+    
+//    [self flushRemainingAudio];
+    [self cleanup];
+    
+    BOOL report = self.isExecuting;
+    
+    [self didFinish];
+    
+    if (report) {
+      [self.task.resampler didFinishResamplingTask:self.task toURL:location];
+    }
+  }
+}
+
+- (void)openInputFile {
+  if (!self.isTaskCanceled && self.isExecuting) {
+    self.inputFile = sf_open(self.task.URL.path.fileSystemRepresentation, SFM_READ, &_inputFileInfo);
+    
+    if (self.inputFile == NULL) {
+      NSDictionary *userInfo = @{ NSLocalizedDescriptionKey: @"Resampling was unsuccessful.",
+                                  NSLocalizedFailureReasonErrorKey: @"Could not open input file.",
+                                  NSLocalizedRecoverySuggestionErrorKey: @"Make sure the file is a support PCM format." };
+      
+      NSError *_error = [NSError errorWithDomain:SOXResamplerErrorDomain
+                                            code:SOXResamplerErrorCannotOpenFile
+                                        userInfo:userInfo];
+      
+      [self didFailWithError:_error];
+
+    }
+  }
+}
+
+- (void)openOutputFile:(NSURL *)location {
+  if (!self.isTaskCanceled && self.isExecuting) {
+    
+    memset(&_outputFileInfo, 0, sizeof(SF_INFO));
+    
+    _outputFileInfo.frames = self.inputFileInfo.frames;
+    _outputFileInfo.channels = self.inputFileInfo.channels;
+    _outputFileInfo.sections = self.inputFileInfo.sections;
+    _outputFileInfo.seekable = self.inputFileInfo.seekable;
+    _outputFileInfo.format = self.inputFileInfo.format;
+    
+    double targetSampleRate = self.task.resampler.immutableConfiguration.targetSampleRate;
+    _outputFileInfo.samplerate = (int)targetSampleRate;
+    
+    self.outputFile = NULL;
+    self.outputFile = sf_open(location.path.fileSystemRepresentation, SFM_WRITE, &_outputFileInfo);
+    
+    if (self.outputFile == NULL) {
+      NSDictionary *userInfo = @{ NSLocalizedDescriptionKey: @"Resampling was unsuccessful.",
+                                  NSLocalizedFailureReasonErrorKey: @"Could not open output file.",
+                                  NSLocalizedRecoverySuggestionErrorKey: @"This may be a app sandboxing issue." };
+      
+      NSError *error = [NSError errorWithDomain:SOXResamplerErrorDomain
+                                           code:SOXResamplerErrorCannotOpenFile
+                                       userInfo:userInfo];
+      
+      [self didFailWithError:error];
+    }
+  }
+}
+
+- (void)setupResampler {
+  if (!self.isTaskCanceled && self.isExecuting) {
+    unsigned int quality = SOXR_HQ;
+    soxr_error_t err;
+    soxr_io_spec_t spec;
+    soxr_quality_spec_t qspec = soxr_quality_spec(quality, 0);
+    
+    spec = soxr_io_spec(SOXR_INT32_I, SOXR_INT32_I);
+    
+    double targetSampleRate = self.task.resampler.immutableConfiguration.targetSampleRate;
+    
+    self.soxr = soxr_create(self.inputFileInfo.samplerate, targetSampleRate, self.inputFileInfo.channels, &err, &spec, &qspec, NULL);
+    
+    if(err || self.soxr == NULL) {
+      NSDictionary *userInfo = @{ NSLocalizedDescriptionKey: @"Resampling was unsuccessful.",
+                                  NSLocalizedFailureReasonErrorKey: @"Could not initialize resampler.",
+                                  NSLocalizedRecoverySuggestionErrorKey: @"Input audio may be unsupported." };
+      
+      NSError *error = [NSError errorWithDomain:SOXResamplerErrorDomain
+                                           code:SOXResamplerErrorCannotInitialize
+                                       userInfo:userInfo];
+      
+      [self didFailWithError:error];
+    }
+  }
+}
+
+- (void)resample:(NSURL *)location {
+  if (!self.isTaskCanceled && self.isExecuting) {
+    
+    int resampleBufferSize;
+    void *resampleBuffer;
+    
+    sf_count_t samplesRead;
+    int64_t totalSamplesRead = 0;
+    
+    int inputBuffer [1024 * self.inputFileInfo.channels];
+    
+    if (inputBuffer == NULL) {
+      NSDictionary *userInfo = @{ NSLocalizedDescriptionKey: @"Encoding was unsuccessful.",
+                                  NSLocalizedFailureReasonErrorKey: @"Could not allocate buffer.",
+                                  NSLocalizedRecoverySuggestionErrorKey: @"You may be out of memory." };
+      
+      NSError *error = [NSError errorWithDomain:SOXResamplerErrorDomain
+                                           code:SOXResamplerErrorCannotAllocateInputBuffer
+                                       userInfo:userInfo];
+      
+      [self didFailWithError:error];
+      return;
+    }
+    
+    while ((samplesRead = sf_readf_int(self.inputFile, inputBuffer, 1024))) {
+      
+      totalSamplesRead += samplesRead;
+      
+      int bufSize = 2.0f * sizeof(int) * samplesRead * self.outputFileInfo.samplerate * self.outputFileInfo.channels / self.inputFileInfo.samplerate;
+      
+      resampleBuffer = malloc(bufSize);
+      resampleBufferSize = bufSize;
+      
+      size_t done = 0;
+      soxr_process(self.soxr, inputBuffer, samplesRead, NULL, resampleBuffer, resampleBufferSize, &done);
+      
+      if (done > 0) {
+
+        sf_writef_int(self.outputFile, resampleBuffer, done);
+      }
+
+      
+      [self.task.resampler.delegate resampler:self.task.resampler task:self.task didResampleFrames:samplesRead totalFramesResampled:totalSamplesRead totalFrameExpectedToResample:self.inputFileInfo.frames];
+      
+    }
+    
+    NSLog(@"%@", location);
+    
+    
+    if(resampleBuffer) {
+      free(resampleBuffer);
+    }
+    resampleBuffer = NULL;
+    resampleBufferSize = 0;
+    
+  }
+}
+
+- (void)cleanup {
+  if (self.outputFile) {
+    sf_close(self.outputFile);
+  }
+  self.outputFile = NULL;
   
-  NSUInteger targetSampleRate = self.task.resampler.immutableConfiguration.targetSampleRate;
+  if (self.inputFile) {
+    sf_close(self.inputFile);
+  }
+  self.inputFile = NULL;
   
-  static SNDFILE *input_file;
+  if(self.soxr) {
+    soxr_delete(self.soxr);
+  }
+  self.soxr = NULL;
+}
+
+- (void)yresampleToURL:(NSURL *)location {
+
+  double targetSampleRate = self.task.resampler.immutableConfiguration.targetSampleRate;
+  
+  // Open input file and get info
+  
+  SNDFILE *input_file;
   SF_INFO input_file_info;
   
   input_file = sf_open(self.task.URL.path.fileSystemRepresentation, SFM_READ, &input_file_info);
+  
+  // Setup output file properties
+  
+  SF_INFO output_file_info;
+  memset(&output_file_info, 0, sizeof(SF_INFO));
+  
+  output_file_info.frames = input_file_info.frames;
+  output_file_info.channels = input_file_info.channels;
+  output_file_info.sections = input_file_info.sections;
+  output_file_info.seekable = input_file_info.seekable;
+  output_file_info.format = input_file_info.format;
+  
+  // Manually set the output sample rate
+  
+  output_file_info.samplerate = (int)targetSampleRate;
+  
+  // Open output file for writing
+  
+  SNDFILE *output_file;
+  output_file = sf_open(location.path.fileSystemRepresentation, SFM_WRITE, &output_file_info);
+  
+  // Setup the soxr resampler
+  
+  unsigned int quality = SOXR_HQ;
+  soxr_error_t err;
+  soxr_io_spec_t spec;
+  soxr_quality_spec_t qspec = soxr_quality_spec(quality, 0);
+  
+  spec = soxr_io_spec(SOXR_INT32_I, SOXR_INT32_I);
+  
+  soxr_t soxr;
+  soxr = soxr_create(input_file_info.samplerate, targetSampleRate, input_file_info.channels, &err, &spec, &qspec, NULL);
+  
+  if(err) {
+    NSDictionary *userInfo = @{ NSLocalizedDescriptionKey: @"Resampling was unsuccessful.",
+                                NSLocalizedFailureReasonErrorKey: @"Could not initialize resampler.",
+                                NSLocalizedRecoverySuggestionErrorKey: @"Input audio may be unsupported." };
+    
+    NSError *error = [NSError errorWithDomain:SOXResamplerErrorDomain
+                                         code:SOXResamplerErrorCannotInitialize
+                                     userInfo:userInfo];
+    
+    [self didFailWithError:error];
+  }
 
-  double const irate = input_file_info.samplerate;
-  double const orate = targetSampleRate;
+  // Read through the input file
   
-  int ochannels = input_file_info.channels;
-  
-  sf_close(input_file);
-  
-  /* Allocate resampling input and output buffers in proportion to the input
-   * and output rates: */
-#define buf_total_len 15000  /* In samples. */
-  size_t const olen = (size_t)(orate * buf_total_len / (irate + orate) + .5);
-  size_t const ilen = buf_total_len - olen;
-  size_t const osize = sizeof(float), isize = osize;
-  void * ibuf = malloc(isize * ilen);
-  void * obuf = malloc(osize * olen);
-  
-  size_t odone, written, need_input = 1;
-  soxr_error_t error;
-  
-  FILE *ifile = fopen(self.task.URL.path.fileSystemRepresentation, "r");
-  FILE *ofile = fopen(location.path.fileSystemRepresentation, "wb");
-  
-  soxr_t soxr = soxr_create(irate,
-                            orate,
-                            ochannels,
-                            &error,
-                            NULL, NULL, NULL);
-  
-  if (!error) {
-    do {
-      size_t ilen1 = 0;
+  int resampleBufferSize;
+  void *resampleBuffer;
+
+  if (soxr) {
+    
+    sf_count_t _frames = 1024;
+    int data [_frames * input_file_info.channels];
+    
+    sf_count_t samples_read;
+    
+    while ((samples_read = sf_readf_int(input_file, data, _frames))) {
       
-      if (need_input) {
-        
-        /* Read one block into the buffer, ready to be resampled: */
-        ilen1 = fread(ibuf, isize, ilen, ifile);
-        
-        if (!ilen1) {     /* If the is no (more) input data available, */
-          free(ibuf);     /* set ibuf to NULL, to indicate end-of-input */
-          ibuf = NULL;    /* to the resampler. */
-        }
+      int bufSize = 2.0f * sizeof(int) * samples_read * output_file_info.samplerate * output_file_info.channels / input_file_info.samplerate;
+      
+      resampleBuffer = malloc(bufSize);
+      resampleBufferSize = bufSize;
+      
+      size_t done = 0;
+      soxr_process(soxr, data, samples_read, NULL, resampleBuffer, resampleBufferSize, &done);
+      
+      if (done > 0) {
+        sf_writef_int(output_file, resampleBuffer, done);
       }
       
-      /* Copy data from the input buffer into the resampler, and resample
-       * to produce as much output as is possible to the given output buffer: */
-      error = soxr_process(soxr, ibuf, ilen1, NULL, obuf, olen, &odone);
-      
-      written = fwrite(obuf, osize, odone, ofile); /* Consume output.*/
-      
-      /* If the actual amount of data output is less than that requested, and
-       * we have not already reached the end of the input data, then supply some
-       * more input next time round the loop: */
-      need_input = odone < olen && ibuf;
-      
-    } while (!error && (need_input || written));
-  } else {
-    NSLog(@"Error creating soxr!");
+    }
+    
   }
   
-  fclose(ifile);
-  fclose(ofile);
+  // Cleanup
   
-  soxr_delete(soxr);
+  if (output_file) {
+    sf_close(output_file);
+  }
+  output_file = NULL;
   
-  NSLog(@"done resampling %@", location);
+  if (input_file) {
+    sf_close(input_file);
+  }
+  input_file = NULL;
+  
+  if(soxr) {
+    soxr_delete(soxr);
+  }
+  soxr = NULL;
+  
+  if(resampleBuffer) {
+    free(resampleBuffer);
+  }
+  resampleBuffer = NULL;
+  resampleBufferSize = 0;
+  
+  NSLog(@"%@", location);
   
   [self.task.resampler.delegate resampler:self.task.resampler task:self.task didFinishResamplingToURL:location];
+  
 }
-
-// For SoX proper
-//- (void)resampleToURL:(NSURL *)location {
-//  sox_format_t * in, * out; /* input and output files */
-//  sox_effects_chain_t * chain;
-//  sox_effect_t * e;
-//  sox_signalinfo_t interm_signal;
-//  char * args[10];
-//
-//  NSUInteger targetSampleRate = self.task.resampler.immutableConfiguration.targetSampleRate;
-//  
-//  const char *input_path = self.task.originalURL.fileSystemRepresentation;
-//  assert(in = sox_open_read(input_path, NULL, NULL, NULL));
-//  
-//  sox_signalinfo_t _signal = in->signal;
-//  _signal.rate = targetSampleRate;
-//  
-//  const char *output_path = location.fileSystemRepresentation;
-//  assert(out = sox_open_write(output_path, &_signal, NULL, NULL, NULL, NULL));
-//  
-//  chain = sox_create_effects_chain(&in->encoding, &out->encoding);
-//  
-//  interm_signal = in->signal;
-//  
-//  e = sox_create_effect(sox_find_effect("input"));
-//  args[0] = (char *)in, assert(sox_effect_options(e, 1, args) == SOX_SUCCESS);
-//  assert(sox_add_effect(chain, e, &interm_signal, &in->signal) == SOX_SUCCESS);
-//  free(e);
-//  
-//  e = sox_create_effect(sox_find_effect("rate"));
-//  assert(sox_effect_options(e, 0, NULL) == SOX_SUCCESS);
-//  assert(sox_add_effect(chain, e, &interm_signal, &out->signal) == SOX_SUCCESS);
-//  free(e);
-//  
-//  e = sox_create_effect(sox_find_effect("output"));
-//  args[0] = (char *)out, assert(sox_effect_options(e, 1, args) == SOX_SUCCESS);
-//  assert(sox_add_effect(chain, e, &interm_signal, &out->signal) == SOX_SUCCESS);
-//  free(e);
-//  
-//  sox_flow_effects(chain, NULL, NULL);
-//  
-//  sox_delete_effects_chain(chain);
-//  sox_close(out);
-//  sox_close(in);
-//  
-//  [self.task.resampler.delegate resampler:self.task.resampler task:self.task didFinishResamplingToURL:location];
-//}
 
 @end

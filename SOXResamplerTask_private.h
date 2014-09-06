@@ -15,10 +15,15 @@
 @property (nonatomic, strong, readonly) SOXResampler *resampler;
 @property (nonatomic, strong, readonly) NSURL *URL;
 
-@property (nonatomic, readonly) const char *path;
+@property (readonly, getter = isCanceled) BOOL canceled;
 
-- (id)initWithURL:(NSURL *)url resampler:(SOXResampler *)resampler;
+//@property (nonatomic, readonly) const char *path;
 
+/* Private Initializers */
+/* neither url nor encoder can be nil */
+- (instancetype)initWithURL:(NSURL *)url resampler:(SOXResampler *)resampler delegate:(id<SOXResamplerTaskDelegate>)delegate;
+
+/* Delegate Notification */
 - (void)didCompleteWithError:(NSError *)error;
 
 @end
